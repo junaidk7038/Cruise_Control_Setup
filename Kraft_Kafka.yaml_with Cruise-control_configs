@@ -1,0 +1,123 @@
+apiVersion: kafka.strimzi.io/v1beta2
+kind: Kafka
+metadata:
+  name: my-cluster
+  annotations:
+    strimzi.io/kraft: enabled
+    strimzi.io/node-pools: enabled
+  namespace: kafka-upgrade
+spec:
+  cruiseControl:
+    config:
+      webserver.security.enable: "false"
+      webserver.ssl.enable: "false"
+      webserver.http.cors.enabled: "true"
+      webserver.http.cors.origin: "*"
+      partition.metrics.window.ms: 300000
+      two.step.verification.enabled: false
+#      metric.reporter.topic: "CruiseControlMetrics"
+      bootstrap.servers: "my-cluster-kafka-bootstrap:9095"
+      client.security.protocol: "PLAINTEXT"
+      network.client.max.retries: "5"
+      network.client.retry.backoff.ms: "1000"
+      broker.metrics.window.ms: 300000
+      num.broker.metrics.windows: 5
+      metric.sampler.class: "com.linkedin.kafka.cruisecontrol.monitor.sampling.CruiseControlMetricsReporterSampler"
+    resources:
+      requests:
+        memory: 512Mi
+        cpu: 200m
+      limits:
+        memory: 1.5Gi
+        cpu: 750m
+  kafka:
+    version: 4.0.0
+    config:
+      metric.reporters: "com.linkedin.kafka.cruisecontrol.metricsreporter.CruiseControlMetricsReporter"
+      bootstrap.servers: "my-cluster-kafka-bootstrap:9095"
+    listeners:
+      - name: plain
+        port: 9092
+        type: internal
+        tls: false
+        authentication:
+          type: scram-sha-512
+      - name: tls
+        port: 9093
+        type: internal
+        tls: true
+        authentication:
+          type: tls
+      - name: nonsasl
+        port: 9095
+        type: internal
+        tls: false
+      - name: external
+        port: 9094
+        type: internal
+        tls: false
+        authentication:
+          type: scram-sha-512
+#    storage:
+#      type: jbod
+#      volumes:
+#        - id: 0
+#         type: persistent-claim
+#          size: 15Gi
+#          class: default
+#          deleteClaim: false
+#  zookeeper:
+#    replicas: 3
+#    storage:
+#      type: persistent-claim
+#      size: 10Gi
+#      class: default
+#      deleteClaim: false
+  entityOperator:
+    topicOperator:
+      resources:
+        requests:
+          memory: "256Mi"
+          cpu: "100m"
+        limits:
+          memory: "512Mi"
+          cpu: "300m"
+    userOperator:
+      resources:
+        requests:
+          memory: "256Mi"
+          cpu: "100m"
+        limits:
+          memory: "512Mi"
+          cpu: "300m"
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaUser
+metadata:
+  name: my-connect-user
+  namespace: kafka-upgrade
+  labels:
+    strimzi.io/cluster: my-cluster
+spec:
+  authentication:
+    type: scram-sha-512
+    password:
+      valueFrom:
+        secretKeyRef:
+          name: kafka-init-user
+          key: password
+  authorization:
+    type: simple
+    acls:
+      - resource:
+          type: topic
+          name: "*"
+          patternType: literal
+        operations: ["All"]
+        host: "*"
+      - resource:
+          type: group
+          name: "*"
+          patternType: literal
+        operations: ["All"]
+        host: "*"
