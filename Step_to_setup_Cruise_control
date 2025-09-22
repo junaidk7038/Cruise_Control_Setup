@@ -1,0 +1,342 @@
+Steps to deploy the cruise controller with strimzi cluster
+
+Deploy the kafka yamal
+
+
+cat kafka-upgrade.yaml 
+apiVersion: kafka.strimzi.io/v1beta2
+kind: Kafka
+metadata:
+  name: my-cluster
+  annotations:
+    strimzi.io/kraft: enabled
+    strimzi.io/node-pools: enabled
+  namespace: kafka-upgrade
+spec:
+  cruiseControl:
+    config:
+      webserver.security.enable: "false"
+      webserver.ssl.enable: "false"
+      webserver.http.cors.enabled: "true"
+      webserver.http.cors.origin: "*"
+      partition.metrics.window.ms: 300000
+      two.step.verification.enabled: true
+      bootstrap.servers: "my-cluster-kafka-bootstrap:9095"
+      client.security.protocol: "PLAINTEXT"
+      network.client.max.retries: "5"
+      network.client.retry.backoff.ms: "1000"
+      broker.metrics.window.ms: 300000
+      num.broker.metrics.windows: 5
+      metric.sampler.class: "com.linkedin.kafka.cruisecontrol.monitor.sampling.CruiseControlMetricsReporterSampler"
+    resources:
+      requests:
+        memory: 512Mi
+        cpu: 200m
+      limits:
+        memory: 1Gi
+        cpu: 500m
+  kafka:
+    version: 4.0.0
+    config:
+      metric.reporters: "com.linkedin.kafka.cruisecontrol.metricsreporter.CruiseControlMetricsReporter"
+      bootstrap.servers: "my-cluster-kafka-bootstrap:9095"
+    listeners:
+      - name: plain
+        port: 9092
+        type: internal
+        tls: false
+        authentication:
+          type: scram-sha-512
+      - name: tls
+        port: 9093
+        type: internal
+        tls: true
+        authentication:
+          type: tls
+      - name: nonsasl
+        port: 9095
+        type: internal
+        tls: false
+      - name: external
+        port: 9094
+        type: internal
+        tls: false
+        authentication:
+          type: scram-sha-512
+#    storage:
+#      type: jbod
+#      volumes:
+#        - id: 0
+#         type: persistent-claim
+#          size: 15Gi
+#          class: default
+#          deleteClaim: false
+#  zookeeper:
+#    replicas: 3
+#    storage:
+#      type: persistent-claim
+#      size: 10Gi
+#      class: default
+#      deleteClaim: false
+  entityOperator:
+    topicOperator:
+      resources:
+        requests:
+          memory: "256Mi"
+          cpu: "100m"
+        limits:
+          memory: "512Mi"
+          cpu: "300m"
+    userOperator:
+      resources:
+        requests:
+          memory: "256Mi"
+          cpu: "100m"
+        limits:
+          memory: "512Mi"
+          cpu: "300m"
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaUser
+metadata:
+  name: my-connect-user
+  namespace: kafka-upgrade
+  labels:
+    strimzi.io/cluster: my-cluster
+spec:
+  authentication:
+    type: scram-sha-512
+    password:
+      valueFrom:
+        secretKeyRef:
+          name: kafka-init-user
+          key: password
+  authorization:
+    type: simple
+    acls:
+      - resource:
+          type: topic
+          name: "*"
+          patternType: literal
+        operations: ["All"]
+        host: "*"
+      - resource:
+          type: group
+          name: "*"
+          patternType: literal
+        operations: ["All"]
+        host: "*"
+
+
+deploy the broker and controller yaml
+
+cat broker-nodepool.yaml 
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaNodePool
+metadata:
+  name: kafka
+  labels:
+    strimzi.io/cluster: my-cluster
+spec:
+  replicas: 3
+  roles:
+    - broker
+  storage:
+    type: jbod
+    volumes:
+      - id: 0
+        type: persistent-claim
+        size: 15Gi
+        class: default
+        deleteClaim: false
+
+
+cat controller-nodepool.yaml 
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaNodePool
+metadata:
+  name: controller
+  labels:
+    strimzi.io/cluster: my-cluster
+spec:
+  replicas: 3
+  roles:
+    - controller
+  storage:
+    type: jbod
+    volumes:
+      - id: 0
+        type: persistent-claim
+        size: 10Gi
+        class: default
+        deleteClaim: false
+
+
+
+####################### This is done in Kafka cluster side #################################
+
+Now in cruise Control deploy the cruise controller
+
+Deploy the cruise controoler ui yaaml
+
+cat cruise-control-ui.yaml 
+# cruise-control-ui.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cruise-control-ui
+  namespace: kafka-upgrade
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cruise-control-ui
+  template:
+    metadata:
+      labels:
+        app: cruise-control-ui
+    spec:
+      containers:
+      - name: cruise-control-ui
+        image: densecravpfyifvv42u6.azurecr.io/cruise-control-ui:1.0
+        ports:
+        - containerPort: 80
+        env:
+        - name: CC_UI_BACKEND_HOST
+          value: "my-cluster-cruise-control"
+        - name: CC_UI_BACKEND_PORT
+          value: "9090"
+        - name: CC_UI_SERVER_PORT
+          value: "80"
+        - name: CC_UI_KAFKA_CLUSTER_NAME
+          value: "my-cluster"
+        resources:
+          requests:
+            memory: 256Mi
+            cpu: 100m
+          limits:
+            memory: 512Mi
+            cpu: 200m
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cruise-control-ui
+  namespace: kafka-upgrade
+spec:
+  type: LoadBalancer
+  selector:
+    app: cruise-control-ui
+  ports:
+  - port: 8080
+    targetPort: 80
+
+
+deploy the configmap for nginx
+
+1st create a cruise-control-ui-nginx.conf  file
+
+cat cruise-control-ui-nginx.conf 
+server {
+    listen       80;
+    listen  [::]:80;
+    server_name  localhost;
+
+    location / {
+        root   /usr/share/nginx/html;
+        index  index.html index.htm;
+        try_files $uri $uri/ /index.html;
+    }
+
+    location /kafkacruisecontrol/ {
+        proxy_pass http://my-cluster-cruise-control:9090/kafkacruisecontrol/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        
+        add_header 'Access-Control-Allow-Origin' '*' always;
+        add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS' always;
+        add_header 'Access-Control-Allow-Headers' 'Origin, Content-Type, Accept, Authorization, X-Requested-With' always;
+        add_header 'Access-Control-Allow-Credentials' 'true' always;
+        add_header 'Access-Control-Expose-Headers' 'User-Task-ID, Content-Type, Authorization' always;
+
+        if ($request_method = 'OPTIONS') {
+            add_header 'Access-Control-Allow-Origin' '*';
+            add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS';
+            add_header 'Access-Control-Allow-Headers' 'Origin, Content-Type, Accept, Authorization, X-Requested-With';
+            add_header 'Access-Control-Allow-Credentials' 'true';
+            add_header 'Access-Control-Max-Age' 1728000;
+            add_header 'Content-Type' 'text/plain charset=UTF-8';
+            add_header 'Content-Length' 0;
+            return 204;
+        }
+    }
+
+    error_page   500 502 503 504  /50x.html;
+    location = /50x.html {
+        root   /usr/share/nginx/html;
+    }
+}
+
+
+# Create ConfigMap
+kubectl create configmap cruise-control-ui-nginx-config -n kafka-upgrade --from-file=cruise-control-ui-nginx.conf
+
+# Update the deployment to use the ConfigMap
+kubectl patch deployment cruise-control-ui -n kafka-upgrade -p '{
+  "spec": {
+    "template": {
+      "spec": {
+        "volumes": [
+          {
+            "name": "nginx-config",
+            "configMap": {
+              "name": "cruise-control-ui-nginx-config"
+            }
+          }
+        ],
+        "containers": [
+          {
+            "name": "cruise-control-ui",
+            "volumeMounts": [
+              {
+                "name": "nginx-config",
+                "mountPath": "/etc/nginx/conf.d/default.conf",
+                "subPath": "cruise-control-ui-nginx.conf"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}'
+
+
+BROKER COMMISSION:
+
+Increase replica in node-pool the follow below steps
+
+NEW BROKERS START EMPTY. YOU NEED TO TRIGGER CRUISE CONTROL TO MOVE PARTITIONS TO THEM:
+		curl -X POST "http://<CC-SERVICE>:8080/kafkacruisecontrol/rebalance?dryrun=false&verbose=true&json=true"
+
+TRACK THE PROGRESS:
+		curl -X GET "http://<CC-SERVICE>:8080/kafkacruisecontrol/user_tasks?json=true"
+
+
+
+
+
+AFTER BROKER REMOVAL FROM NODEPOOL FOLLOW BELOW STEP TO REMOVE BROKER:
+
+REMOVE:
+		curl -X POST "http://20.255.110.158:8080/kafkacruisecontrol/remove_broker?brokerid=6&dryrun=false&json=true"
+
+
+TRACK THE PROGRESS:
+		curl "http://20.255.110.158:8080/kafkacruisecontrol/user_tasks?json=true"
+
+
+
+
