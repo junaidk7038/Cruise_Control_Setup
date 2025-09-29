@@ -9,6 +9,8 @@ metadata:
 spec:
   cruiseControl:
     config:
+      cruise.control.model.complete.cache: "true" #This allows CC to auto-fix problems and apply plans automatically.
+      cruise.control.self.healing.enabled: "true" #This allows CC to auto-fix problems and apply plans automatically.      
       webserver.security.enable: "false"
       webserver.ssl.enable: "false"
       webserver.http.cors.enabled: "true"
